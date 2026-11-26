@@ -568,7 +568,7 @@ Verified on 2026-11-26:
 | `npm test` | Passed: 5 tests, isolated database, no provider calls |
 | `npm run build` | Passed; Vite reports a 557 KB main JavaScript chunk (160 KB gzip), above its 500 KB warning threshold |
 | `npm run lint` | Could not run in this environment: a local Application Control policy blocks the oxlint native binary. CI runs it on Linux. |
-| Live model-provider smoke run | Not performed; a provider key was not available. |
+| Live model-provider smoke run | Attempted with `gpt-5.4-mini`, `MOZAIK_MAX_STEPS=2`, a fresh `DATA_DIR` and proxy-enforced caps (16 attempts, 1,600 output tokens/request, 40,000 cumulative tokens). Provider returned `credit_balance_exhausted` (HTTP 429) on every attempt; 0 input/output tokens were billed. Five specialists overlapped and the deterministic pair was shown, but no agent observations or auditor result were produced, so this is not a clean demo pass. |
 
 These are local development checks, not a production certification or a live model-provider test.
 
