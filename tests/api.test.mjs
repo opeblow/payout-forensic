@@ -259,6 +259,26 @@ test('authenticated API workflows preserve account boundaries and reject invalid
     json: { confirmExternalProcessing: false },
   }), 400)
 
+  const demo = expectStatus(await request(`/api/investigations/${investigationId}/run-demo`, {
+    method: 'POST',
+    cookie: activeCookieA,
+    json: {},
+  }), 202)
+  assert.equal(demo.model, 'deterministic-demo')
+  assert.equal(demo.mode, 'deterministic')
+  let demoBatch
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    demoBatch = expectStatus(await request(`/api/mozaik/batches/${demo.runId}`, { cookie: activeCookieA }), 200)
+    if (demoBatch.batch.status !== 'queued' && demoBatch.batch.status !== 'running') break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  assert.equal(demoBatch.batch.status, 'completed')
+  assert.equal(demoBatch.batch.model, 'deterministic-demo')
+  assert.equal(demoBatch.runs.length, 6)
+  const demoObservations = demoBatch.runs.flatMap((run) => (run.summary?.observations || []).map((observation) => observation))
+  assert.ok(demoObservations.some((observation) => observation.category === 'duplicate_reference'))
+  assert.ok(demoObservations.every((observation) => observation.status === 'unverified'))
+
   expectStatus(await request('/api/notifications/seed', {
     method: 'POST',
     cookie: activeCookieA,
