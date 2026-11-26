@@ -254,7 +254,7 @@ Only report candidate observations supported by the supplied source records. Do 
             maxOutputTokens: 1800,
             tools: [evidenceToolDefinition],
             structuredOutput: { name: 'evidence_observations', schema: observationSchema, strict: true },
-            context,
+            context: { items: context },
           },
         },
       })
