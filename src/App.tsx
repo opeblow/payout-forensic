@@ -151,16 +151,18 @@ function RunDetail({ run, evidence }: { run: AgentRun; evidence: EvidenceRow[] }
 function BatchPanel({ detail }: { detail: BatchDetail }) {
   const specialists = detail.runs.filter((run) => run.agent_name !== 'Adversarial Auditor')
   const auditor = detail.runs.find((run) => run.agent_name === 'Adversarial Auditor')
+  const isDemo = detail.batch.model === 'deterministic-demo'
   return (
     <section className="app-panel batch-panel">
       <div className="panel-heading">
-        <div><span>Mozaik batch {detail.batch.id.slice(0, 8)}</span><strong>{detail.batch.status} · {detail.batch.model}</strong></div>
+        <div><span>Batch {detail.batch.id.slice(0, 8)}</span><strong>{detail.batch.status} · {detail.batch.model}</strong></div>
       </div>
       <div className="batch-timeline">
         <span>Started {formatTime(detail.batch.createdAt)}</span>
         <span>Finished {formatTime(detail.batch.finishedAt)}</span>
-        <span>{specialists.length} specialists ran in parallel{auditor ? '; auditor ran after them' : ''}</span>
+        <span>{specialists.length} specialists {isDemo ? 'produced rule-based observations' : 'ran in parallel'}{auditor ? '; auditor ran after them' : ''}</span>
       </div>
+      {isDemo && <p className="investigation-note">Model-free deterministic demo: observations come from local rules on the uploaded rows, not a language model or external provider.</p>}
       {detail.runs.length ? (
         <div className="run-grid">{detail.runs.map((run) => <RunDetail key={run.id} run={run} evidence={detail.evidence} />)}</div>
       ) : <p className="investigation-note">The batch is queued. This panel refreshes automatically.</p>}
@@ -865,6 +867,27 @@ function WorkspacePage() {
     }
   }
 
+  async function runModelFreeDemo(id: string) {
+    try {
+      const response = await fetch(`/api/investigations/${id}/run-demo`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+      const data = await response.json()
+      if (response.ok) {
+        setStatus(`Model-free demo batch ${data.runId} is ${data.status}. This panel updates automatically.`)
+        setBatchDetail(null)
+        setActiveBatchId(data.runId)
+      } else {
+        setStatus(data.error || 'Unable to start the model-free demo.')
+      }
+    } catch {
+      setStatus('The demo status could not be confirmed. Check the batch panel before retrying.')
+    }
+  }
+
   return (
     <div className="dashboard-content workspace-content">
       <div className="dashboard-heading">
@@ -909,7 +932,7 @@ function WorkspacePage() {
             <small className="provider-note">Imports preserve record IDs, amounts, source row numbers and supplied reference, currency, type and status. Automated reconciliation totals are not available yet.</small>
             <button className="primary-button" type="button" onClick={createInvestigation}>Start investigation <ArrowRight size={16} /></button>
             <small className="provider-note">{mozaikConfigured ? 'Mozaik is configured. You choose when to send your records for agent review.' : 'Mozaik agent runs require a configured model provider API key.'}</small>
-            {newInvestigationId && <button className="secondary-button" type="button" onClick={() => runInvestigation(newInvestigationId)} disabled={!mozaikConfigured}>Start Mozaik agents</button>}
+            {newInvestigationId && <div className="table-actions"><button className="secondary-button" type="button" onClick={() => runModelFreeDemo(newInvestigationId)} disabled={Boolean(activeBatchId)}>Start model-free demo</button><button className="secondary-button" type="button" onClick={() => runInvestigation(newInvestigationId)} disabled={!mozaikConfigured}>Start Mozaik agents</button></div>}
             {status && <div className="settings-status">{status}</div>}
           </section>
         </div>
@@ -919,7 +942,7 @@ function WorkspacePage() {
           <table>
             <thead><tr><th>Investigation</th><th>Status</th><th>Variance</th><th>Created</th><th>Action</th></tr></thead>
             <tbody>{investigations.length ? investigations.map((item) => (
-              <tr key={item.id}><td><Link to={`/app/investigations/${item.id}`}><strong>{item.name}</strong><small>{item.id}</small></Link></td><td>{item.status}</td><td>Not calculated</td><td>{new Date(item.created_at).toLocaleDateString()}</td><td><button className="table-action" onClick={() => runInvestigation(item.id)} disabled={!mozaikConfigured}>Run agents</button></td></tr>
+              <tr key={item.id}><td><Link to={`/app/investigations/${item.id}`}><strong>{item.name}</strong><small>{item.id}</small></Link></td><td>{item.status}</td><td>Not calculated</td><td>{new Date(item.created_at).toLocaleDateString()}</td><td><div className="table-actions"><button className="table-action" onClick={() => runModelFreeDemo(item.id)}>Model-free demo</button><button className="table-action" onClick={() => runInvestigation(item.id)} disabled={!mozaikConfigured}>Run agents</button></div></td></tr>
             )) : <tr><td colSpan={5}>No investigations yet. Create one and upload your financial records.</td></tr>}</tbody>
           </table>
           {status && <div className="settings-status">{status}</div>}
@@ -930,7 +953,7 @@ function WorkspacePage() {
             <section className="app-panel data-table-panel">
               <div className="panel-heading">
                 <div><span>{selectedInvestigation.id}</span><strong>{selectedInvestigation.name} · {selectedInvestigation.status}</strong></div>
-                <button className="table-action" onClick={() => runInvestigation(selectedInvestigation.id)} disabled={!mozaikConfigured || Boolean(activeBatchId)}>Run agents</button>
+                <div className="table-actions"><button className="table-action" onClick={() => runModelFreeDemo(selectedInvestigation.id)} disabled={Boolean(activeBatchId)}>Model-free demo</button><button className="table-action" onClick={() => runInvestigation(selectedInvestigation.id)} disabled={!mozaikConfigured || Boolean(activeBatchId)}>Run agents</button></div>
               </div>
               <p className="investigation-note">Financial variance is not calculated. Imported rows and agent observations are shown as evidence, not verified accounting findings.</p>
               <table>
