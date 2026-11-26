@@ -544,8 +544,8 @@ npm run preview
 ### Deploying to Render
 
 1. Create a **Web Service** from this repository with Runtime **Node**, Build Command `npm ci && npm run build`, Start Command `npm start`, and Health Check Path `/api/health`.
-2. Set `HOST=0.0.0.0`, `PORT=10000` and `DATA_DIR=/data`. Add a persistent disk mounted at `/data` so SQLite files and uploads survive restarts.
-3. Set strong random `JWT_SECRET` and `DATA_ENCRYPTION_KEY` values in the host secret store. Do not add provider keys; the model-free demo needs none.
+2. Set `HOST=0.0.0.0`, `PORT=10000` and `DATA_DIR=/tmp/payout-forensics-data` on the free plan. On a paid plan, mount a persistent disk at `/data` and set `DATA_DIR=/data` instead.
+3. Set strong random `JWT_SECRET` and `DATA_ENCRYPTION_KEY` values in the host secret store. Do not set `NODE_ENV=production`: Render exposes `RENDER=true`, and `NODE_ENV=production` makes `npm ci` skip the devDependencies needed by Vite and TypeScript. Do not add provider keys; the model-free demo needs none.
 4. Keep registration private or gated for judging. Do not deploy the Vite dev server.
 
 ## Testing and quality
