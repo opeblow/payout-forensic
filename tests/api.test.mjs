@@ -8,6 +8,8 @@ import path from 'node:path'
 import { after, before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { validateObservations } from '../lib/observation-validation.mjs'
+import { findDuplicateGroups } from '../lib/duplicate-check.mjs'
+import { resolveBatchStatus, displayVariance } from '../lib/batch-status.mjs'
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 let dataDirectory
@@ -123,6 +125,43 @@ test('agent observations require non-empty evidence linked to cited records', ()
   assert.equal(validateObservations([null], evidence).length, 0)
 })
 
+test('every cited record needs its own supporting evidence row', () => {
+  const evidence = [
+    { id: 'ev-1', recordId: 'tx-1' },
+    { id: 'ev-2', recordId: 'tx-2' },
+  ]
+  const candidate = {
+    category: 'duplicate_reference',
+    recordIds: ['tx-1', 'tx-2'],
+    evidence: ['ev-1'],
+    explanation: 'Two records share a reference.',
+    confidence: 0.8,
+  }
+  assert.equal(validateObservations([candidate], evidence).length, 0)
+  assert.equal(validateObservations([{ ...candidate, evidence: ['ev-1', 'ev-2'] }], evidence).length, 1)
+})
+
+test('duplicate detection requires matching reference, currency and amount', () => {
+  const rows = [
+    { id: 'a', reference: 'PAY-100', currency: 'USD', amount: '125.40' },
+    { id: 'b', reference: 'PAY-100', currency: 'USD', amount: '125.40' },
+    { id: 'c', reference: 'PAY-100', currency: 'EUR', amount: '125.40' },
+    { id: 'd', reference: '', currency: 'USD', amount: '125.40' },
+  ]
+  const groups = findDuplicateGroups(rows)
+  assert.equal(groups.length, 1)
+  assert.deepEqual(groups[0].rows.map((row) => row.id), ['a', 'b'])
+})
+
+test('batch status distinguishes complete, partial and failed runs', () => {
+  assert.equal(resolveBatchStatus([{ status: 'completed' }, { status: 'completed' }]), 'completed')
+  assert.equal(resolveBatchStatus([{ status: 'completed' }, { status: 'failed' }]), 'partial')
+  assert.equal(resolveBatchStatus([{ status: 'failed' }]), 'failed')
+  assert.equal(resolveBatchStatus([]), 'failed')
+  assert.equal(displayVariance('0'), 'Not calculated')
+  assert.equal(displayVariance(''), 'Not calculated')
+})
+
 test('authenticated API workflows preserve account boundaries and reject invalid inputs', async () => {
   const userA = `test_${randomUUID().replace(/-/g, '').slice(0, 12)}`
   const passwordA = 'Temporary-Test-Password-42!'
@@ -150,6 +189,14 @@ test('authenticated API workflows preserve account boundaries and reject invalid
     method: 'POST',
     json: { identifier: userA, password: 'Temporary-Test-Password-43!' },
   }), 200)
+  expectStatus(await request('/api/auth/login', {
+    method: 'POST',
+    json: { identifier: `${userA}@example.invalid`, password: 'Temporary-Test-Password-43!' },
+  }), 200)
+  expectStatus(await request('/api/auth/register', {
+    method: 'POST',
+    json: { name: 'Duplicate Email', username: `${userA}_dup`, email: `${userA}@example.invalid`, password: passwordA },
+  }), 409)
 
   const created = expectStatus(await request('/api/investigations', {
     method: 'POST',
@@ -159,12 +206,12 @@ test('authenticated API workflows preserve account boundaries and reject invalid
   const investigationId = created.investigation.id
 
   const csv = [
-    'transaction_id,amount,currency,type,status',
-    'TX-API-001,125.40,USD,payout,posted',
-    'TX-API-002,-125.40,USD,refund,posted',
-    'TX-API-003,12.50,USD,fee,posted',
-    'TX-API-004,,USD,payout,posted',
-    'TX-API-005,0,USD,adjustment,posted',
+    'transaction_id,amount,currency,type,status,reference',
+    'TX-API-001,125.40,USD,payout,posted,PAY-DUP-1',
+    'TX-API-002,125.40,USD,payout,posted,PAY-DUP-1',
+    'TX-API-003,-125.40,USD,refund,posted,REF-1',
+    'TX-API-004,,USD,payout,posted,REF-2',
+    'TX-API-005,0,USD,adjustment,posted,ADJ-1',
   ].join('\n')
   const uploaded = expectStatus(await request(`/api/investigations/${investigationId}/upload`, {
     method: 'POST',
@@ -177,8 +224,20 @@ test('authenticated API workflows preserve account boundaries and reject invalid
 
   const evidence = expectStatus(await request(`/api/investigations/${investigationId}/evidence`, { cookie: activeCookieA }), 200)
   assert.equal(evidence.evidence.length, 4)
+  const firstRow = evidence.evidence.find((row) => row.recordId === 'TX-API-001')
+  assert.equal(firstRow.rowNumber, 2)
+  assert.equal(firstRow.currency, 'USD')
+  assert.equal(firstRow.type, 'payout')
+  assert.equal(firstRow.originalStatus, 'posted')
+  assert.equal(firstRow.reference, 'PAY-DUP-1')
+  assert.equal(firstRow.status, 'Unresolved')
+  const duplicateCheck = expectStatus(await request(`/api/investigations/${investigationId}/duplicate-check`, { cookie: activeCookieA }), 200)
+  assert.equal(duplicateCheck.groups.length, 1)
+  assert.equal(duplicateCheck.groups[0].reference, 'PAY-DUP-1')
+  assert.equal(duplicateCheck.groups[0].rows.length, 2)
   const dashboard = expectStatus(await request('/api/dashboard', { cookie: activeCookieA }), 200)
   assert.equal(dashboard.evidenceCount, 4)
+  assert.equal(dashboard.investigations[0].variance, 'Not calculated')
   const investigations = expectStatus(await request('/api/investigations', { cookie: activeCookieA }), 200)
   assert.equal(investigations.investigations.length, 1)
   const search = expectStatus(await request(`/api/search?q=${encodeURIComponent(investigationId)}`, { cookie: activeCookieA }), 200)
