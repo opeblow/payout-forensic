@@ -1,0 +1,4 @@
+transaction_id,amount,currency,type,status,reference
+TX-SYN-101,125.40,USD,payout,posted,PAY-DEMO-001
+TX-SYN-102,125.40,USD,payout,posted,PAY-DEMO-001
+TX-SYN-103,18.00,USD,fee,posted,FEE-DEMO-001
