@@ -3,13 +3,13 @@
 ## Development setup
 
 ```bash
-npm install
+npm ci
 npm test
 npm run build
 npm run lint
 ```
 
-`npm test` starts the API with an isolated temporary database and synthetic records. It does not call a model provider.
+Use Node.js 22.x to match CI and the locked native dependencies. `npm test` starts the API with an isolated temporary database and synthetic records. It does not call a model provider.
 
 For local development, start `npm run dev:api` and `npm run dev` in separate terminals.
 
