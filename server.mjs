@@ -9,6 +9,7 @@ import multer from 'multer'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { parse } from 'csv-parse/sync'
 import { Agent, Loop, initAgentModule, resolveAgentModule, supportedModels } from '@mozaik-ai/core'
 import { validateObservations } from './lib/observation-validation.mjs'
@@ -833,6 +834,23 @@ app.get('/api/search', auth, (req, res) => {
     .slice(0, 10)
   res.json({ results })
 })
+
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true })
+})
+
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'Not found' })
+})
+
+const distDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'dist')
+if (fs.existsSync(distDirectory)) {
+  app.use(express.static(distDirectory))
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next()
+    res.sendFile(path.join(distDirectory, 'index.html'))
+  })
+}
 
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error)
