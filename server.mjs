@@ -322,6 +322,104 @@ async function runMozaikBatch(batchId, userId, investigationId) {
     .run(status, new Date().toISOString(), batchId)
 }
 
+function deterministicObservationsFor(agentName, evidence) {
+  if (agentName === 'Transaction Investigator') {
+    return findDuplicateGroups(evidence).map((group) => {
+      const rows = group.rows.slice(0, 3)
+      return {
+        category: 'duplicate_reference',
+        recordIds: rows.map((row) => row.recordId).filter(Boolean),
+        evidence: rows.map((row) => row.id),
+        explanation: `Rows ${rows.map((row) => row.rowNumber).join(', ')} share reference ${group.reference}, currency ${group.currency} and amount ${group.amount}. Confirm whether this is a repeated payout.`,
+        confidence: 0.92,
+      }
+    })
+  }
+  if (agentName === 'Fee Auditor') {
+    const rows = evidence.filter((row) => String(row.type).trim().toLowerCase() === 'fee').slice(0, 3)
+    if (!rows.length) return []
+    return [{
+      category: 'fee_review',
+      recordIds: rows.map((row) => row.recordId).filter(Boolean),
+      evidence: rows.map((row) => row.id),
+      explanation: `Fee rows ${rows.map((row) => row.rowNumber).join(', ')} are present in the supplied records. Confirm the fee terms from the source system.`,
+      confidence: 0.45,
+    }]
+  }
+  if (agentName === 'Refund Investigator') {
+    const rows = evidence.filter((row) => String(row.type).trim().toLowerCase() === 'refund').slice(0, 3)
+    if (!rows.length) return []
+    return [{
+      category: 'refund_review',
+      recordIds: rows.map((row) => row.recordId).filter(Boolean),
+      evidence: rows.map((row) => row.id),
+      explanation: `Refund rows ${rows.map((row) => row.rowNumber).join(', ')} are present in the supplied records. Confirm the refund authorization and destination.`,
+      confidence: 0.45,
+    }]
+  }
+  if (agentName === 'Settlement Investigator') {
+    const rows = evidence.filter((row) => String(row.type).trim().toLowerCase() === 'settlement').slice(0, 3)
+    if (!rows.length) return []
+    return [{
+      category: 'settlement_review',
+      recordIds: rows.map((row) => row.recordId).filter(Boolean),
+      evidence: rows.map((row) => row.id),
+      explanation: `Settlement rows ${rows.map((row) => row.rowNumber).join(', ')} are present in the supplied records. Confirm the settlement window against the source ledger.`,
+      confidence: 0.45,
+    }]
+  }
+  if (agentName === 'FX Investigator') {
+    const currencies = new Set(evidence.map((row) => String(row.currency).trim().toUpperCase()).filter(Boolean))
+    if (currencies.size < 2) return []
+    const rows = evidence.slice(0, 3)
+    return [{
+      category: 'fx_review',
+      recordIds: rows.map((row) => row.recordId).filter(Boolean),
+      evidence: rows.map((row) => row.id),
+      explanation: `The supplied records contain ${currencies.size} currencies (${[...currencies].join(', ')}). Confirm the exchange rates used at settlement.`,
+      confidence: 0.45,
+    }]
+  }
+  return []
+}
+
+function recordDeterministicRun({ batchId, userId, investigationId, agentName, observations, reviewedCount = 0 }) {
+  const runId = crypto.randomUUID()
+  const startedAt = new Date().toISOString()
+  db.prepare(`INSERT INTO agent_runs (id, batch_id, user_id, investigation_id, agent_name, loop_id, status, started_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(runId, batchId, userId, investigationId, agentName, `deterministic-${runId}`, 'completed', startedAt)
+  db.prepare('UPDATE agent_runs SET status = ?, summary = ?, finished_at = ? WHERE id = ?')
+    .run('completed', encrypt(JSON.stringify({ observations, reviewedCount, mode: 'deterministic-demo' })), new Date().toISOString(), runId)
+  return { runId, name: agentName, status: 'completed', observations }
+}
+
+function runDeterministicBatch(batchId, userId, investigationId) {
+  db.prepare('UPDATE mozaik_batches SET status = ? WHERE id = ?').run('running', batchId)
+  const evidence = db.prepare('SELECT * FROM evidence WHERE investigation_id = ? ORDER BY row_number, created_at LIMIT 1000')
+    .all(investigationId)
+    .map(mapEvidence)
+  const results = specialistAgents.filter((agent) => agent.name !== 'Adversarial Auditor').map((agent) => recordDeterministicRun({
+    batchId,
+    userId,
+    investigationId,
+    agentName: agent.name,
+    observations: validateObservations(deterministicObservationsFor(agent.name, evidence), evidence),
+  }))
+  const priorObservations = results.flatMap((result) => result.observations.map((observation) => ({ agent: result.name, ...observation })))
+  const challenged = priorObservations.filter((observation) => observation.confidence < 0.5).length
+  results.push(recordDeterministicRun({
+    batchId,
+    userId,
+    investigationId,
+    agentName: 'Adversarial Auditor',
+    observations: [],
+    reviewedCount: challenged,
+  }))
+  const status = resolveBatchStatus(results)
+  db.prepare('UPDATE mozaik_batches SET status = ?, finished_at = ? WHERE id = ?')
+    .run(status, new Date().toISOString(), batchId)
+}
+
 const evidenceToolDefinition = {
   name: 'get_investigation_evidence',
   description: 'Read source evidence rows belonging to the current user and investigation. This tool is read-only.',
@@ -684,6 +782,29 @@ app.post('/api/investigations/:id/run', auth, (req, res) => {
     })
   })
   res.status(202).json({ runId: batchId, status: 'queued', model: selectedModel })
+})
+
+app.post('/api/investigations/:id/run-demo', auth, (req, res) => {
+  const investigation = db.prepare('SELECT id FROM investigations WHERE id = ? AND user_id = ?').get(req.params.id, req.user.sub)
+  if (!investigation) return res.status(404).json({ error: 'Investigation not found' })
+  const { count } = db.prepare('SELECT COUNT(*) AS count FROM evidence WHERE investigation_id = ?').get(req.params.id)
+  if (count === 0) return res.status(422).json({ error: 'Upload evidence before starting the model-free demo.' })
+  if (count > 1000) return res.status(413).json({ error: 'This demo is limited to 1,000 evidence rows. Narrow the upload before continuing.' })
+  const active = db.prepare(`SELECT id FROM mozaik_batches
+    WHERE investigation_id = ? AND user_id = ? AND status IN ('queued', 'running')`).get(req.params.id, req.user.sub)
+  if (active) return res.status(409).json({ error: 'A batch is already active for this investigation.' })
+  const batchId = crypto.randomUUID()
+  db.prepare(`INSERT INTO mozaik_batches (id, user_id, investigation_id, model, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)`).run(batchId, req.user.sub, req.params.id, 'deterministic-demo', 'queued', new Date().toISOString())
+  setImmediate(() => {
+    try {
+      runDeterministicBatch(batchId, req.user.sub, req.params.id)
+    } catch {
+      db.prepare('UPDATE mozaik_batches SET status = ?, finished_at = ? WHERE id = ?')
+        .run('failed', new Date().toISOString(), batchId)
+    }
+  })
+  res.status(202).json({ runId: batchId, status: 'queued', model: 'deterministic-demo', mode: 'deterministic' })
 })
 
 app.get('/api/notifications', auth, (req, res) => {
