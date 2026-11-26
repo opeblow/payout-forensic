@@ -50,6 +50,8 @@ Without a provider key, the full steps 1–7 and the API test suite still run lo
 - [Brand](#brand)
 - [Judge demo: possible duplicate payout](#judge-demo-possible-duplicate-payout)
 - [Problem](#problem)
+- [Solution](#solution)
+- [Why this is critical in finance](#why-this-is-critical-in-finance)
 - [How the system works](#how-the-system-works)
   - [Deterministic and model-assisted boundaries](#deterministic-and-model-assisted-boundaries)
 - [Architecture](#architecture)
@@ -109,6 +111,14 @@ Financial operations records are commonly distributed across processor exports, 
 A variance value alone is not a conclusion. The answer must be traceable to original records and any unsupported interpretation must remain separate from verified accounting facts.
 
 Payout Forensics is designed around that distinction. CSV uploads become encrypted evidence rows. Model output is treated as `unverified` candidate observation data until it is connected to valid source identifiers.
+
+## Solution
+
+Payout Forensics is an evidence-first investigation workspace that turns raw CSV exports into an auditable case file. It preserves row-level provenance, applies deterministic duplicate checks, and exposes five rule-based specialist perspectives followed by an adversarial audit pass in the credential-free demo. When a funded provider key is configured, the same structure runs through Mozaik agents under explicit user consent and bounded inference steps. Every candidate observation is source-linked, marked `Unverified`, and never presented as a final accounting conclusion.
+
+## Why this is critical in finance
+
+In finance operations, an unexplained discrepancy is not just a spreadsheet issue: it can affect payout accuracy, refund accountability, fee transparency, settlement reconciliation, audit readiness and customer trust. Duplicate payouts can release funds twice; unsupported fee or FX assumptions can misstate balances; and opaque automation can create conclusions that cannot be defended to an auditor. A workflow that preserves provenance, separates candidates from verified facts, and makes failures visible reduces the risk of acting on bad evidence.
 
 ## How the system works
 
