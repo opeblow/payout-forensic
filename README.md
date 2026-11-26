@@ -1,4 +1,10 @@
-# Payout Forensics
+# <img src="public/favicon.svg" alt="Payout Forensics logo" width="48" height="48" /> Payout Forensics
+
+## DEMO VIDEO
+
+[![Payout Forensics demo video](https://img.youtube.com/vi/RTe0JV4WMXU/0.jpg)](https://youtu.be/RTe0JV4WMXU)
+
+[Watch the demo on YouTube](https://youtu.be/RTe0JV4WMXU)
 
 **Every transaction has a story. Every discrepancy leaves a trace.**
 
@@ -6,10 +12,28 @@ Payout Forensics is an account-scoped financial investigation workspace for uplo
 
 The product serves finance operations teams and engineers who need to inspect financial records without losing the connection to the original source. It addresses fragmented exports and manual reconciliation by keeping record provenance, agent reasoning boundaries and uncertainty visible.
 
+## Judge demo: possible duplicate payout
+
+This is the one workflow to run. It uses only the synthetic file committed at [`examples/duplicate-payout.csv`](examples/duplicate-payout.csv); no real financial data is included.
+
+1. Use a recent **Node.js 22.x** release, then `npm ci`.
+2. Copy `.env.example` to `.env`. Keep `DATA_DIR` outside the checkout, for example `DATA_DIR=../payout-forensics-data`, and set a local provider key only if you intend to run the agents.
+3. In two terminals, run `npm run dev:api` and `npm run dev`. Open `http://localhost:5173` and register a local account.
+4. Choose **New investigation**, name it `Duplicate payout demo`, and upload `examples/duplicate-payout.csv`.
+5. Open the investigation. The evidence table shows all three preserved source rows with their CSV row numbers, references, currency, type and original status. The **Possible duplicate payouts** check groups `TX-SYN-101` and `TX-SYN-102` because their reference, currency and amount all match.
+6. If a provider key is configured, select **Run agents** and confirm external processing. The batch panel polls automatically: five specialists start in parallel, then the Adversarial Auditor reviews their observations. Start and finish times are shown for each run.
+7. Expand each run to read the explanation, cited record IDs, source row numbers and the `Unverified` status. The auditor run shows how many candidate observations it challenged.
+
+Expected result: rows 2 and 3 of the CSV are displayed as a possible duplicate payout by the deterministic check. Agent output remains candidate, source-linked and `Unverified`; it is not a confirmed finding. Reconciliation variance stays **Not calculated** because no accounting engine computes totals. A batch can finish as `completed`, `partial` or `failed`; `partial` means at least one agent succeeded and the failed agents are named. A run interrupted by an API restart is marked `interrupted` and can be retried.
+
+Without a provider key, steps 1–5 and the complete API test suite still run locally. Do not run `npm run dev` on a public interface: the server's fallback `DATA_DIR` is `./data` inside the checkout, where Vite could serve it. The committed `.env.example` now points outside the checkout; keep that setting.
+
 ![Payout Forensics landing page](docs/screenshots/landing-page.png)
 
 ## Contents
 
+- [DEMO VIDEO](#demo-video)
+- [Judge demo: possible duplicate payout](#judge-demo-possible-duplicate-payout)
 - [Problem](#problem)
 - [How the system works](#how-the-system-works)
 - [Architecture](#architecture)
@@ -206,7 +230,11 @@ Mozaik agents and Loops are persisted through custom SQLite repositories:
 - Individual runs are stored in `agent_runs`.
 - Batch status is stored in `mozaik_batches`.
 
-The first five results are collected with `Promise.all`. Their candidate observations become `priorCandidateObservations` for the Adversarial Auditor. The auditor executes only when at least one specialist completed successfully.
+The first five results are collected with `Promise.all`. Their candidate observations become `priorCandidateObservations` for the Adversarial Auditor. The auditor executes only when at least one specialist completed successfully. The auditor receives a count of the observations it reviewed.
+
+Batch status is resolved from the agent results: all runs completed gives `completed`, at least one success gives `partial`, and no successes gives `failed`. A failed auditor therefore produces `partial` rather than `completed`. On API startup, batches and agent runs left in `queued` or `running` are marked `interrupted` and become retryable.
+
+The investigation page polls the batch endpoint while a run is active. It renders each observation's explanation, cited record IDs, supporting CSV row numbers and `unverified` status, alongside every run's start and finish time and any error code. The auditor review is shown next to the deterministic source-row match.
 
 ### Mozaik lifecycle
 
@@ -255,7 +283,7 @@ This means the implementation is suitable for evidence ingestion and model-assis
 | Currency normalization | Not implemented |
 | Rounding policy | Not implemented |
 | Transaction matching | Not implemented as deterministic reconciliation |
-| Duplicate detection | Model-assisted candidate observation only |
+| Duplicate detection | Deterministic match on reference, currency and amount for the demo; model-assisted candidate observation otherwise |
 | Settlement matching | Model-assisted candidate observation only |
 | Refund verification | Model-assisted candidate observation only |
 | Fee validation | Model-assisted candidate observation only |
@@ -263,26 +291,25 @@ This means the implementation is suitable for evidence ingestion and model-assis
 | Verified/disputed/dismissed classification | Not implemented |
 | Reconciliation report export | Not implemented |
 
-### Synthetic reconciliation example
+### Synthetic duplicate example
 
-The following synthetic CSV demonstrates the ingestion contract; it does not represent a tested or verified reconciliation result.
+The committed demo file at `examples/duplicate-payout.csv` demonstrates the ingestion contract and the deterministic check:
 
 ```csv
-transaction_id,amount,currency,type,status
-TX-SYN-001,125.40,USD,payout,posted
-TX-SYN-002,-125.40,USD,refund,posted
-TX-SYN-003,12.50,USD,fee,posted
+transaction_id,amount,currency,type,status,reference
+TX-SYN-101,125.40,USD,payout,posted,PAY-DEMO-001
+TX-SYN-102,125.40,USD,payout,posted,PAY-DEMO-001
+TX-SYN-103,18.00,USD,fee,posted,FEE-DEMO-001
 ```
 
 For these rows, the implementation stores:
 
-- Record ID `TX-SYN-001`, `TX-SYN-002` or `TX-SYN-003`.
-- Evidence ID for each generated row.
-- Amount as text.
-- Source filename.
-- Initial status `Unresolved`.
+- Record ID and source CSV row number for each row.
+- A generated evidence ID for each row.
+- Amount as text, plus the supplied currency, type, status and reference when present.
+- Source filename and initial import status `Unresolved`.
 
-The application does not calculate `125.40 + (-125.40) - 12.50 = -12.50` or infer that the third row is a fee. Those interpretations require future deterministic reconciliation logic and explicit source configuration.
+A deterministic check groups `TX-SYN-101` and `TX-SYN-102` by matching reference, currency and amount. It does not verify that the rows are the same payout, calculate a variance, or infer that the third row is a fee. Those interpretations remain candidate observations or require future reconciliation logic.
 
 ### Finding status
 
@@ -294,8 +321,10 @@ Each uploaded evidence row has:
 
 - A generated evidence UUID.
 - A source record ID from `transaction_id`, `id`, or `ROW-<CSV line>`.
+- The original CSV row number.
 - An amount string.
-- A status (`Unresolved` at upload).
+- Supplied `currency`, `type`, `status` and `reference` values when the CSV contains them.
+- An import status (`Unresolved` at upload), distinct from the original source status.
 - A source filename.
 - An investigation ID.
 - A creation timestamp.
@@ -313,12 +342,16 @@ The evidence graph is implemented through these identifiers and foreign-key rela
 
 An observation is not persisted when:
 
-- `recordIds` is missing or empty.
+- `recordIds` or `evidence` is missing or empty.
 - A record ID is not in the evidence set.
 - An evidence ID is not in the evidence set.
+- A cited evidence ID belongs to a record that is not cited.
+- A cited record has no corresponding evidence ID in the same observation.
 - The explanation exceeds 500 characters.
 - Confidence is outside `0..1`.
 - The model does not return strict structured output.
+
+Validation runs in both directions, but valid identifiers only prove that the observation points at imported rows. They do not verify the explanation or any arithmetic, so all accepted observations stay `Unverified`.
 
 ## Technology
 
@@ -396,19 +429,19 @@ All screenshots are existing browser captures. Empty workspaces represent real n
 
 ### Reproduce the application
 
-1. Install dependencies:
+1. Install dependencies from the lockfile with Node.js 22.x:
 
    ```bash
-   npm install
+   npm ci
    ```
 
-2. Configure secrets in `.env` from `.env.example`:
+2. Configure secrets in `.env` from `.env.example`, keeping `DATA_DIR` outside the checkout:
 
    ```dotenv
    NODE_ENV=development
    HOST=127.0.0.1
    PORT=8787
-   DATA_DIR=./data
+   DATA_DIR=../payout-forensics-data
    JWT_SECRET=<32-or-more-random-characters>
    DATA_ENCRYPTION_KEY=<32-or-more-random-characters>
    MOZAIK_MODEL=gpt-5.4-mini
@@ -433,14 +466,7 @@ All screenshots are existing browser captures. Empty workspaces represent real n
 
 ### Synthetic CSV
 
-Create a temporary file without real financial data:
-
-```csv
-transaction_id,amount,currency,type,status
-TX-SYN-001,125.40,USD,payout,posted
-TX-SYN-002,-125.40,USD,refund,posted
-TX-SYN-003,12.50,USD,fee,posted
-```
+Use the committed [`examples/duplicate-payout.csv`](examples/duplicate-payout.csv); it contains no real financial data. It includes a `reference` column so the deterministic duplicate check has something to compare.
 
 The upload accepts up to 25 MB and 1,000 evidence rows are the limit for an agent run. Blank amounts, non-decimal text and values outside the finite numeric range are rejected. Valid rows are committed together; database failures do not leave a partial import.
 
@@ -461,15 +487,15 @@ The default model is `gpt-5.4-mini`. `MOZAIK_MODEL` must name a model supported 
 
 ### Prerequisites
 
-- Node.js 20 or later.
+- Node.js 22.x (a recent 22.12+ release). The locked `better-sqlite3` requires Node 22+, and Vite 8 requires 22.12+ on the 22.x line; CI uses Node 22.
 - npm.
-- A local writable `data/` directory.
+- A local writable directory for SQLite and temporary uploads, configured outside the checkout with `DATA_DIR`.
 - Optional: a supported model provider API key.
 
 ### Setup
 
 ```bash
-npm install
+npm ci
 cp .env.example .env
 npm run dev:api
 ```
@@ -482,7 +508,7 @@ npm run dev
 
 The API binds to `127.0.0.1:8787` by default. Vite serves the frontend on port `5173` and proxies `/api` to the API. Set `HOST` explicitly to expose the API on another interface; do so only behind deployment-appropriate network controls.
 
-SQLite creates `data/payout.db` and the `data/uploads/` temporary directory on startup.
+SQLite creates `payout.db` and an `uploads/` temporary directory inside `DATA_DIR` on startup. Keep that directory outside the checkout so the Vite dev server cannot serve database or upload files.
 
 ### Environment reference
 
@@ -495,6 +521,7 @@ SQLite creates `data/payout.db` and the `data/uploads/` temporary directory on s
 | `JWT_SECRET` | Production | Ephemeral random development value | JWT signing secret; use at least 32 characters |
 | `DATA_ENCRYPTION_KEY` | Production | Development-only fallback | AES-256-GCM key material; use at least 32 characters |
 | `MOZAIK_MODEL` | No | `gpt-5.4-mini` | Selected Mozaik-supported model |
+| `MOZAIK_MAX_STEPS` | No | `3` | Inference loops per agent, from 1 to 10; set to `1` for a capped smoke run |
 | `OPENAI_API_KEY` | For OpenAI | unset | OpenAI provider credential |
 | `ANTHROPIC_API_KEY` | For Anthropic | unset | Anthropic provider credential |
 | `GEMINI_API_KEY` | For Google | unset | Google provider credential |
@@ -521,28 +548,27 @@ npm run build
 npm run lint
 ```
 
-`npm test` covers agent evidence-to-record validation, registration/session behavior, investigation creation, CSV upload and row validation, evidence/dashboard reads, account isolation, notifications, consent enforcement, malformed JSON handling and unauthenticated access. `npm run build` runs `tsc -b` and a Vite production build. `npm run lint` runs oxlint.
+`npm test` covers bidirectional evidence validation, deterministic duplicate grouping, batch status resolution, registration/session behavior including duplicate encrypted email and login by email, investigation creation, CSV field preservation, evidence/dashboard reads, account isolation, notifications, consent enforcement, malformed JSON handling and unauthenticated access. `npm run build` runs `tsc -b` and a Vite production build. `npm run lint` runs oxlint. GitHub Actions runs all three with `npm ci` on Node 22.
 
 The suite does not cover:
 
 - Actual model-provider credentials or live Mozaik inference.
-- Agent provenance edge cases.
-- Financial invariant arithmetic (no reconciliation engine exists).
 - Browser-driven frontend interactions or visual regression.
+- Financial invariant arithmetic (no reconciliation engine exists).
 - Uploads at the 25 MB limit and concurrent requests.
 
-These gaps should be treated as roadmap quality work, not implied test coverage.
+These gaps should be treated as roadmap quality work, not implied test coverage. Before submitting a demo that claims agent findings exist, run a separate live smoke test with a disposable provider key, a fresh `DATA_DIR` outside the checkout, `MOZAIK_MAX_STEPS=1`, a request-attempt cap, a per-request output-token cap and a cumulative token cap. Keep the key server-side and do not paste provider logs into public issues. The automated suite deliberately leaves provider keys blank and never calls a model.
 
 ### Latest local verification
 
-Verified on 2026-11-22:
+Verified on 2026-11-26:
 
 | Check | Result |
 | --- | --- |
-| `npm test` | Passed: 2 tests, isolated database, no provider calls |
-| `npm run build` | Passed; Vite reports a 544 KB main JavaScript chunk (157 KB gzip), above its 500 KB warning threshold |
-| `npm run lint` | Passed |
-| Local HTTP smoke checks | Passed for account, profile/password, investigation, CSV, evidence, dashboard, search, notifications, consent rejection and account isolation paths |
+| `npm test` | Passed: 5 tests, isolated database, no provider calls |
+| `npm run build` | Passed; Vite reports a 557 KB main JavaScript chunk (160 KB gzip), above its 500 KB warning threshold |
+| `npm run lint` | Could not run in this environment: a local Application Control policy blocks the oxlint native binary. CI runs it on Linux. |
+| Live model-provider smoke run | Attempted with `gpt-5.4-mini`, `MOZAIK_MAX_STEPS=2`, a fresh `DATA_DIR` and proxy-enforced caps (16 attempts, 1,600 output tokens/request, 40,000 cumulative tokens). Provider returned `credit_balance_exhausted` (HTTP 429) on every attempt; 0 input/output tokens were billed. Five specialists overlapped and the deterministic pair was shown, but no agent observations or auditor result were produced, so this is not a clean demo pass. |
 
 These are local development checks, not a production certification or a live model-provider test.
 
@@ -550,23 +576,24 @@ These are local development checks, not a production certification or a live mod
 
 - Passwords use Argon2id.
 - Sessions use signed JWT values in HTTP-only cookies.
-- Profile names and email addresses are AES-256-GCM encrypted at rest.
+- Profile names and email addresses are AES-256-GCM encrypted at rest; duplicate checks and email login decrypt stored values rather than comparing plaintext to ciphertext.
 - Investigation names, evidence record IDs, evidence amounts and source filenames are AES-256-GCM encrypted at rest.
 - Agent definitions and loop records are encrypted at rest.
 - CSV uploads are restricted to 25 MB and `.csv` filenames.
 - Uploaded files are temporary and removed after parsing.
 - Cross-account investigation and evidence queries verify ownership.
 - Agent evidence access uses short-lived in-memory access tokens and verifies investigation ownership.
-- Candidate observations require non-empty evidence IDs tied to the cited records; invalid categories and unsupported provenance are rejected.
+- Candidate observations require non-empty evidence IDs tied to the cited records in both directions; invalid categories and unsupported provenance are rejected.
 - Agent runs are limited to 1,000 evidence rows.
 - API error responses do not include server stack traces or filesystem paths.
+- Registration and login have in-memory per-IP limits of 10 attempts per 15 minutes; this is process-local and does not replace a shared gateway or proxy limit.
+- Interrupted runs are marked retryable on startup instead of staying `queued` or `running`.
 - The API binds to `127.0.0.1` by default; changing `HOST` can expose it to other interfaces.
 - SQLite is local and intended for local-first use.
-- Authentication endpoints do not currently implement rate limiting.
 
-Production deployments remain responsible for TLS termination, secret management, persistent storage, backups, network controls and host security. Do not expose the API beyond loopback without deployment-appropriate protections, including rate limiting. The repository does not claim SOC 2, PCI DSS, ISO certification or other compliance status.
+Keep the demo local or gated. Do not expose the Vite dev server to judges: with the default `DATA_DIR=./data`, SQLite files and temporary uploads live inside the checkout and can be served by Vite. Set `DATA_DIR` outside the checkout. If you host the demo, serve the built frontend and the API behind HTTPS, keep registration private or gated, cap model usage with a provider spend limit, and keep provider keys server-side only. Production deployments remain responsible for TLS termination, secret management, persistent storage, backups, network controls and host security. The repository does not claim SOC 2, PCI DSS, ISO certification or other compliance status.
 
-No seeded customer financial records or demo findings are included. Synthetic data should be used for testing.
+No seeded customer financial records or demo findings are included. The committed demo CSV is synthetic and should be used for testing.
 
 ## Engineering decisions
 
@@ -600,19 +627,21 @@ The implementation leaves unresolved evidence unresolved. It does not label unse
 
 - Account registration and login.
 - Account-scoped investigation and evidence storage.
-- CSV upload and validation.
+- CSV upload, validation and preservation of supplied reference, currency, type, status and row numbers.
+- A deterministic reference/currency/amount duplicate check with a committed synthetic demo file.
 - Local SQLite persistence and encryption.
 - Six Mozaik agent definitions.
-- Persisted Mozaik Loops and agent runs.
-- Provenance validation and unverified candidate observations.
-- Explicit provider consent.
-- Public product and empty workspace UI.
+- Persisted Mozaik Loops, agent runs and batches with `completed`, `partial`, `failed` and `interrupted` states.
+- Bidirectional provenance validation and unverified candidate observations.
+- Batch polling UI with explanations, cited rows, auditor review, error codes and start/finish times.
+- Explicit provider consent and in-memory authentication rate limits.
+- Public product and authenticated workspace UI.
 
 ### Partial
 
 - Reconciliation: only basic numeric import validation exists; no authoritative calculation engine.
 - Evidence graph: implemented as related database identifiers, not a dedicated graph view.
-- Investigation detail: shows uploaded source rows and persisted agent run status; no reconciliation result model exists yet.
+- Investigation detail: shows preserved source rows, deterministic duplicates and persisted observations with timings; no verified finding or reconciliation result model exists yet.
 - Reports: no report generation or export.
 - Settlements: no dedicated settlement ingestion or reconciliation.
 - FX: model review only; no deterministic rates or currency arithmetic.
@@ -623,7 +652,7 @@ The implementation leaves unresolved evidence unresolved. It does not label unse
 ### Planned
 
 - Integer minor-unit decimal calculations and currency-specific rounding.
-- Deterministic duplicate, refund, fee and settlement matching.
+- Deterministic refund, fee and settlement matching.
 - Verified, disputed and unresolved finding states.
 - Contradiction and provenance tracing in a dedicated evidence graph.
 - PDF or structured report export.
@@ -641,12 +670,18 @@ The implementation leaves unresolved evidence unresolved. It does not label unse
 |   |-- index.css          Global styles
 |   `-- main.tsx           React entry point
 |-- lib/
-|   `-- observation-validation.mjs
+|   |-- observation-validation.mjs   Bidirectional provenance checks
+|   |-- duplicate-check.mjs          Deterministic reference/currency/amount matching
+|   `-- batch-status.mjs             Batch status and variance display helpers
 |-- tests/
 |   `-- api.test.mjs       Isolated HTTP and provenance tests
+|-- examples/
+|   `-- duplicate-payout.csv         Synthetic judge-demo evidence
 |-- public/                Icons and web manifest
 |-- docs/screenshots/      Verified application screenshots
-|-- data/                  SQLite database and uploads
+|-- data/                  SQLite database and uploads (gitignored)
+|-- production/            Local media production assets (gitignored)
+|-- .github/workflows/     CI with npm ci, tests, lint and build
 |-- .env.example           Environment variable template
 |-- package.json           Scripts and dependencies
 `-- vite.config.ts         Development proxy and build config

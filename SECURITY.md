@@ -15,9 +15,10 @@ Production deployments must provide their own persistent storage, TLS terminatio
 - Evidence record IDs, amounts and source filenames are encrypted at rest with AES-256-GCM.
 - Mozaik agent definitions and loop state are encrypted at rest.
 - Logout clears the session cookie.
-- Authentication endpoints do not currently have rate limiting.
+- Registration and login are limited to 10 attempts per 15 minutes per IP address; the counter is in memory and per process.
+- Email login and duplicate-email checks decrypt stored addresses instead of comparing plaintext to ciphertext.
 
-The API binds to loopback by default. Changing `HOST` to a non-loopback address requires deployment-level network controls and rate limiting; those protections are not supplied by this application.
+The API binds to loopback by default. Changing `HOST` to a non-loopback address requires deployment-level network controls, TLS and a shared rate limiter; the in-process limit is not a substitute for those protections. Keep `DATA_DIR` outside the checkout and do not expose the Vite development server to untrusted users, because its default data directory is inside the repository tree.
 
 ## Upload handling
 

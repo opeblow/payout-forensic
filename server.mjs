@@ -12,12 +12,21 @@ import path from 'node:path'
 import { parse } from 'csv-parse/sync'
 import { Agent, Loop, initAgentModule, resolveAgentModule, supportedModels } from '@mozaik-ai/core'
 import { validateObservations } from './lib/observation-validation.mjs'
+import { findDuplicateGroups } from './lib/duplicate-check.mjs'
+import { resolveBatchStatus, displayVariance } from './lib/batch-status.mjs'
 
 const app = express()
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '127.0.0.1'
 const dataDirectory = path.resolve(process.env.DATA_DIR || './data')
 const uploadDirectory = path.join(dataDirectory, 'uploads')
+function readBoundedInt(name, fallback, min, max) {
+  const raw = process.env[name]
+  if (!raw) return fallback
+  const value = Number(raw)
+  return Number.isInteger(value) && value >= min && value <= max ? value : fallback
+}
+const maxAgentSteps = readBoundedInt('MOZAIK_MAX_STEPS', 3, 1, 10)
 if (process.env.NODE_ENV === 'production' && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32 || !process.env.DATA_ENCRYPTION_KEY || process.env.DATA_ENCRYPTION_KEY.length < 32)) {
   throw new Error('Production requires JWT_SECRET and DATA_ENCRYPTION_KEY values of at least 32 characters.')
 }
@@ -36,12 +45,13 @@ db.exec(`
   );
   CREATE TABLE IF NOT EXISTS investigations (
     id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL,
-    status TEXT NOT NULL, variance TEXT NOT NULL DEFAULT '0', created_at TEXT NOT NULL,
+    status TEXT NOT NULL, variance TEXT NOT NULL DEFAULT 'Not calculated', created_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
   CREATE TABLE IF NOT EXISTS evidence (
     id TEXT PRIMARY KEY, investigation_id TEXT NOT NULL, record_id TEXT NOT NULL,
     status TEXT NOT NULL, amount TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL,
+    row_number INTEGER, currency TEXT, type TEXT, original_status TEXT, reference TEXT,
     FOREIGN KEY (investigation_id) REFERENCES investigations(id) ON DELETE CASCADE
   );
   CREATE TABLE IF NOT EXISTS notifications (
@@ -76,6 +86,20 @@ db.exec(`
     FOREIGN KEY (investigation_id) REFERENCES investigations(id) ON DELETE CASCADE
   );
 `)
+
+const evidenceColumns = new Set(db.prepare('PRAGMA table_info(evidence)').all().map((column) => column.name))
+for (const [column, definition] of Object.entries({
+  row_number: 'INTEGER',
+  currency: 'TEXT',
+  type: 'TEXT',
+  original_status: 'TEXT',
+  reference: 'TEXT',
+})) {
+  if (!evidenceColumns.has(column)) db.exec(`ALTER TABLE evidence ADD COLUMN ${column} ${definition}`)
+}
+const recoveredAt = new Date().toISOString()
+db.prepare("UPDATE mozaik_batches SET status = 'interrupted', finished_at = ? WHERE status IN ('queued', 'running')").run(recoveredAt)
+db.prepare("UPDATE agent_runs SET status = 'interrupted', error_code = 'SERVER_RESTARTED', finished_at = ? WHERE status IN ('queued', 'running')").run(recoveredAt)
 
 const emptyMemory = {
   async remember() {},
@@ -182,7 +206,7 @@ function readModelText(loop) {
   return JSON.parse(text)
 }
 
-async function runMozaikAgent({ batchId, userId, investigationId, definition, evidence, priorObservations }) {
+async function runMozaikAgent({ batchId, userId, investigationId, definition, evidence, priorObservations, reviewedCount = 0 }) {
   const runId = crypto.randomUUID()
   const accessToken = crypto.randomBytes(24).toString('hex')
   mozaikAccessTokens.set(accessToken, userId)
@@ -206,7 +230,7 @@ Only report candidate observations supported by the supplied source records. Do 
       evidence: evidence.slice(0, 100),
       evidenceLimit: Math.min(evidence.length, 100),
       evidenceTotal: evidence.length,
-      instruction: 'If evidenceTotal is larger than evidence.length, use get_investigation_evidence to inspect every remaining page before making observations. Request offsets in order, using limits no larger than 500. Only cite returned recordIds and evidence IDs.',
+      instruction: 'Rows include rowNumber, currency, type, originalStatus and reference when the source CSV supplied them. Use only fields actually present in a row. If evidenceTotal is larger than evidence.length, use get_investigation_evidence to inspect every remaining page before making observations. Request offsets in order, using limits no larger than 500. Only cite returned recordIds and evidence IDs.',
       priorCandidateObservations: priorObservations || [],
     }
     const loop = await mozaik.createLoop({
@@ -220,7 +244,7 @@ Only report candidate observations supported by the supplied source records. Do 
     ]
     let responseLoop = loop
     let parsed
-    for (let step = 0; step < 3; step++) {
+    for (let step = 0; step < maxAgentSteps; step++) {
       await mozaik.setBreakpoint({
         loopId: loop.id,
         instruction: {
@@ -230,7 +254,7 @@ Only report candidate observations supported by the supplied source records. Do 
             maxOutputTokens: 1800,
             tools: [evidenceToolDefinition],
             structuredOutput: { name: 'evidence_observations', schema: observationSchema, strict: true },
-            context,
+            context: { items: context },
           },
         },
       })
@@ -264,7 +288,7 @@ Only report candidate observations supported by the supplied source records. Do 
     const checked = validateObservations(parsed.observations, evidence)
     await mozaik.endLoop({ loopId: loop.id, message: 'Candidate observations validated against source record identifiers.' })
     db.prepare('UPDATE agent_runs SET status = ?, summary = ?, finished_at = ? WHERE id = ?')
-      .run('completed', encrypt(JSON.stringify({ observations: checked })), new Date().toISOString(), runId)
+      .run('completed', encrypt(JSON.stringify({ observations: checked, reviewedCount })), new Date().toISOString(), runId)
     return { runId, name: definition.name, status: 'completed', observations: checked }
   } catch (error) {
     const code = error?.name === 'APIError' ? 'PROVIDER_REQUEST_FAILED' : 'MOZAIK_EXECUTION_FAILED'
@@ -278,9 +302,9 @@ Only report candidate observations supported by the supplied source records. Do 
 
 async function runMozaikBatch(batchId, userId, investigationId) {
   db.prepare('UPDATE mozaik_batches SET status = ? WHERE id = ?').run('running', batchId)
-  const evidence = db.prepare('SELECT id, record_id, status, amount, source FROM evidence WHERE investigation_id = ? ORDER BY created_at LIMIT 1000')
+  const evidence = db.prepare('SELECT * FROM evidence WHERE investigation_id = ? ORDER BY row_number, created_at LIMIT 1000')
     .all(investigationId)
-    .map((row) => ({ id: row.id, recordId: decrypt(row.record_id), status: row.status, amount: decrypt(row.amount), source: decrypt(row.source) }))
+    .map(mapEvidence)
   const specialists = specialistAgents.filter((agent) => agent.name !== 'Adversarial Auditor')
   const results = await Promise.all(specialists.map((definition) => runMozaikAgent({
     batchId, userId, investigationId, definition, evidence, priorObservations: [],
@@ -290,10 +314,10 @@ async function runMozaikBatch(batchId, userId, investigationId) {
     results.push(await runMozaikAgent({
       batchId, userId, investigationId,
       definition: specialistAgents.find((agent) => agent.name === 'Adversarial Auditor'),
-      evidence, priorObservations,
+      evidence, priorObservations, reviewedCount: priorObservations.length,
     }))
   }
-  const status = results.some((result) => result.status === 'completed') ? 'completed' : 'failed'
+  const status = resolveBatchStatus(results)
   db.prepare('UPDATE mozaik_batches SET status = ?, finished_at = ? WHERE id = ?')
     .run(status, new Date().toISOString(), batchId)
 }
@@ -324,9 +348,9 @@ mozaik.registerTool('get_investigation_evidence', {
     if (!investigation) throw new Error('Investigation not found')
     const offset = Number.isInteger(offsetValue) && offsetValue >= 0 ? offsetValue : 0
     const limit = Number.isInteger(limitValue) ? Math.min(Math.max(limitValue, 1), 500) : 100
-    return db.prepare('SELECT id, record_id, status, amount, source FROM evidence WHERE investigation_id = ? ORDER BY created_at LIMIT ? OFFSET ?')
+    return db.prepare('SELECT * FROM evidence WHERE investigation_id = ? ORDER BY row_number, created_at LIMIT ? OFFSET ?')
       .all(investigationId, limit, offset)
-      .map((row) => ({ id: row.id, recordId: decrypt(row.record_id), status: row.status, amount: decrypt(row.amount), source: decrypt(row.source) }))
+      .map(mapEvidence)
   },
 })
 
@@ -356,6 +380,33 @@ function decrypt(value) {
   return Buffer.concat([decipher.update(Buffer.from(dataHex, 'hex')), decipher.final()]).toString('utf8')
 }
 
+function optionalField(value) {
+  const text = String(value ?? '').trim()
+  return text ? text : null
+}
+
+function mapEvidence(row) {
+  return {
+    id: row.id,
+    recordId: decrypt(row.record_id),
+    rowNumber: row.row_number ?? null,
+    amount: decrypt(row.amount),
+    currency: row.currency ? decrypt(row.currency) : '',
+    type: row.type ? decrypt(row.type) : '',
+    status: row.status,
+    originalStatus: row.original_status ? decrypt(row.original_status) : '',
+    reference: row.reference ? decrypt(row.reference) : '',
+    source: decrypt(row.source),
+  }
+}
+
+function mapRun(row) {
+  return {
+    ...row,
+    summary: row.summary ? JSON.parse(decrypt(row.summary)) : null,
+  }
+}
+
 function auth(req, res, next) {
   const token = req.cookies.pf_session
   if (!token) return res.status(401).json({ error: 'Authentication required' })
@@ -377,7 +428,30 @@ function setSession(res, user) {
   })
 }
 
-app.post('/api/auth/register', async (req, res) => {
+function findUserByEmail(email) {
+  const normalized = String(email || '').trim().toLowerCase()
+  return db.prepare('SELECT * FROM users').all().find((candidate) => {
+    try { return decrypt(candidate.email) === normalized } catch { return false }
+  })
+}
+
+const authAttempts = new Map()
+function authRateLimit(max, windowMs) {
+  return (req, res, next) => {
+    const key = `${req.ip}:${req.path}`
+    const now = Date.now()
+    const attempts = (authAttempts.get(key) || []).filter((time) => now - time < windowMs)
+    if (attempts.length >= max) {
+      res.setHeader('Retry-After', Math.ceil((attempts[0] + windowMs - now) / 1000))
+      return res.status(429).json({ error: 'Too many authentication attempts. Try again later.' })
+    }
+    attempts.push(now)
+    authAttempts.set(key, attempts)
+    next()
+  }
+}
+
+app.post('/api/auth/register', authRateLimit(10, 15 * 60 * 1000), async (req, res) => {
   try {
     const name = String(req.body.name || '').trim()
     const username = String(req.body.username || '').trim().toLowerCase()
@@ -386,7 +460,7 @@ app.post('/api/auth/register', async (req, res) => {
     if (!name || !/^[a-z0-9_.-]{3,32}$/.test(username) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 12) {
       return res.status(400).json({ error: 'Use a valid name, username, email, and a password of at least 12 characters.' })
     }
-    const existing = db.prepare('SELECT id FROM users WHERE username = ? OR email = ?').get(username, email)
+    const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username) || findUserByEmail(email)
     if (existing) return res.status(409).json({ error: 'Username or email is already registered.' })
     const id = crypto.randomUUID()
     const passwordHash = await argon2.hash(password, { type: argon2.argon2id, memoryCost: 19456, timeCost: 3, parallelism: 1 })
@@ -401,17 +475,11 @@ app.post('/api/auth/register', async (req, res) => {
   }
 })
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authRateLimit(10, 15 * 60 * 1000), async (req, res) => {
   try {
     const identifier = String(req.body.identifier || '').trim().toLowerCase()
     const password = String(req.body.password || '')
-    let row = db.prepare('SELECT * FROM users WHERE username = ?').get(identifier)
-    if (!row) {
-      const users = db.prepare('SELECT * FROM users').all()
-      row = users.find((candidate) => {
-        try { return decrypt(candidate.email) === identifier } catch { return false }
-      })
-    }
+    const row = db.prepare('SELECT * FROM users WHERE username = ?').get(identifier) || findUserByEmail(identifier)
     if (!row) return res.status(401).json({ error: 'Invalid credentials' })
     if (!(await argon2.verify(row.password_hash, password))) return res.status(401).json({ error: 'Invalid credentials' })
     const user = { id: row.id, name: decrypt(row.name), username: row.username }
@@ -455,7 +523,7 @@ app.post('/api/me/password', auth, async (req, res) => {
 
 app.get('/api/investigations', auth, (req, res) => {
   const rows = db.prepare('SELECT * FROM investigations WHERE user_id = ? ORDER BY created_at DESC').all(req.user.sub)
-  res.json({ investigations: rows.map((row) => ({ ...row, name: decrypt(row.name) })) })
+  res.json({ investigations: rows.map((row) => ({ ...row, name: decrypt(row.name), variance: displayVariance(row.variance) })) })
 })
 
 app.post('/api/investigations', auth, (req, res) => {
@@ -463,8 +531,8 @@ app.post('/api/investigations', auth, (req, res) => {
   if (!name) return res.status(400).json({ error: 'Investigation name is required' })
   const id = `INV-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
   db.prepare('INSERT INTO investigations (id, user_id, name, status, variance, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(id, req.user.sub, encrypt(name), 'Detected', '0', new Date().toISOString())
-  res.status(201).json({ investigation: { id, name, status: 'Detected', variance: '0' } })
+    .run(id, req.user.sub, encrypt(name), 'Detected', 'Not calculated', new Date().toISOString())
+  res.status(201).json({ investigation: { id, name, status: 'Detected', variance: 'Not calculated' } })
 })
 
 app.post('/api/investigations/:id/upload', auth, upload.single('file'), (req, res) => {
@@ -491,13 +559,28 @@ app.post('/api/investigations/:id/upload', auth, upload.single('file'), (req, re
         rejected++
         return
       }
-      acceptedRecords.push({ recordId, amount })
+      acceptedRecords.push({
+        recordId,
+        amount,
+        rowNumber: index + 2,
+        currency: optionalField(record.currency ?? record.currency_code),
+        type: optionalField(record.type ?? record.record_type),
+        originalStatus: optionalField(record.status),
+        reference: optionalField(record.reference ?? record.payout_reference ?? record.refund_reference ?? record.settlement_reference),
+      })
     })
     const importedAt = new Date().toISOString()
-    const insertEvidence = db.prepare('INSERT INTO evidence (id, investigation_id, record_id, status, amount, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    const insertEvidence = db.prepare(`INSERT INTO evidence
+      (id, investigation_id, record_id, status, amount, source, created_at, row_number, currency, type, original_status, reference)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     db.transaction(() => {
       for (const record of acceptedRecords) {
-        insertEvidence.run(crypto.randomUUID(), req.params.id, encrypt(record.recordId), 'Unresolved', encrypt(record.amount), encrypt(req.file.originalname), importedAt)
+        insertEvidence.run(
+          crypto.randomUUID(), req.params.id, encrypt(record.recordId), 'Unresolved', encrypt(record.amount),
+          encrypt(req.file.originalname), importedAt, record.rowNumber,
+          record.currency && encrypt(record.currency), record.type && encrypt(record.type),
+          record.originalStatus && encrypt(record.originalStatus), record.reference && encrypt(record.reference),
+        )
       }
       if (acceptedRecords.length > 0) {
         db.prepare('UPDATE investigations SET status = ? WHERE id = ?').run('Investigating', req.params.id)
@@ -513,20 +596,21 @@ app.post('/api/investigations/:id/upload', auth, upload.single('file'), (req, re
 app.get('/api/investigations/:id/evidence', auth, (req, res) => {
   const investigation = db.prepare('SELECT id FROM investigations WHERE id = ? AND user_id = ?').get(req.params.id, req.user.sub)
   if (!investigation) return res.status(404).json({ error: 'Investigation not found' })
-  const rows = db.prepare('SELECT * FROM evidence WHERE investigation_id = ? ORDER BY created_at DESC').all(req.params.id)
-  res.json({ evidence: rows.map((row) => ({
-    id: row.id,
-    recordId: decrypt(row.record_id),
-    status: row.status,
-    amount: decrypt(row.amount),
-    source: decrypt(row.source),
-  })) })
+  const rows = db.prepare('SELECT * FROM evidence WHERE investigation_id = ? ORDER BY row_number, created_at DESC').all(req.params.id)
+  res.json({ evidence: rows.map(mapEvidence) })
+})
+
+app.get('/api/investigations/:id/duplicate-check', auth, (req, res) => {
+  const investigation = db.prepare('SELECT id FROM investigations WHERE id = ? AND user_id = ?').get(req.params.id, req.user.sub)
+  if (!investigation) return res.status(404).json({ error: 'Investigation not found' })
+  const evidence = db.prepare('SELECT * FROM evidence WHERE investigation_id = ? ORDER BY row_number, created_at').all(req.params.id).map(mapEvidence)
+  res.json({ groups: findDuplicateGroups(evidence) })
 })
 
 app.get('/api/dashboard', auth, (req, res) => {
   const investigations = db.prepare('SELECT id, name, status, variance, created_at FROM investigations WHERE user_id = ? ORDER BY created_at DESC')
     .all(req.user.sub)
-    .map((row) => ({ ...row, name: decrypt(row.name) }))
+    .map((row) => ({ ...row, name: decrypt(row.name), variance: displayVariance(row.variance) }))
   const evidenceCount = db.prepare(`SELECT COUNT(e.id) AS count FROM evidence e
     JOIN investigations i ON i.id = e.investigation_id WHERE i.user_id = ?`).get(req.user.sub).count
   const runCount = db.prepare('SELECT COUNT(*) AS count FROM agent_runs WHERE user_id = ?').get(req.user.sub).count
@@ -549,11 +633,29 @@ app.get('/api/mozaik/status', auth, (req, res) => {
 app.get('/api/mozaik/runs', auth, (req, res) => {
   const rows = db.prepare(`SELECT id, batch_id, investigation_id, agent_name, loop_id, status, summary, error_code, started_at, finished_at
     FROM agent_runs WHERE user_id = ? ORDER BY started_at DESC LIMIT 100`).all(req.user.sub)
+  res.json({ runs: rows.map(mapRun) })
+})
+
+app.get('/api/mozaik/batches/:id', auth, (req, res) => {
+  const batch = db.prepare(`SELECT id, investigation_id, model, status, created_at, finished_at
+    FROM mozaik_batches WHERE id = ? AND user_id = ?`).get(req.params.id, req.user.sub)
+  if (!batch) return res.status(404).json({ error: 'Batch not found' })
+  const runs = db.prepare(`SELECT id, batch_id, agent_name, status, error_code, summary, started_at, finished_at
+    FROM agent_runs WHERE batch_id = ? AND user_id = ? ORDER BY started_at`).all(batch.id, req.user.sub).map(mapRun)
+  const evidence = db.prepare('SELECT * FROM evidence WHERE investigation_id = ? ORDER BY row_number, created_at')
+    .all(batch.investigation_id).map(mapEvidence)
   res.json({
-    runs: rows.map((row) => ({
-      ...row,
-      summary: row.summary ? JSON.parse(decrypt(row.summary)) : null,
-    })),
+    batch: {
+      id: batch.id,
+      investigationId: batch.investigation_id,
+      model: batch.model,
+      status: batch.status,
+      createdAt: batch.created_at,
+      finishedAt: batch.finished_at,
+    },
+    runs,
+    evidence,
+    deterministicMatches: findDuplicateGroups(evidence),
   })
 })
 

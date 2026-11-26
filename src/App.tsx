@@ -32,6 +32,169 @@ const navItems = [
   { label: 'About', to: '/about' },
 ]
 
+type Observation = {
+  category: string
+  recordIds: string[]
+  evidence: string[]
+  explanation: string
+  confidence: number
+  status: string
+}
+
+type EvidenceRow = {
+  id: string
+  recordId: string
+  rowNumber: number | null
+  amount: string
+  currency: string
+  type: string
+  status: string
+  originalStatus: string
+  reference: string
+  source: string
+}
+
+type AgentRun = {
+  id: string
+  batch_id: string
+  investigation_id: string
+  agent_name: string
+  status: string
+  error_code: string | null
+  started_at: string
+  finished_at: string | null
+  summary: { observations: Observation[]; reviewedCount?: number } | null
+}
+
+type DuplicateGroup = {
+  key: string
+  reference: string
+  currency: string
+  amount: string
+  rows: EvidenceRow[]
+}
+
+type BatchDetail = {
+  batch: {
+    id: string
+    investigationId: string
+    model: string
+    status: string
+    createdAt: string
+    finishedAt: string | null
+  }
+  runs: AgentRun[]
+  evidence: EvidenceRow[]
+  deterministicMatches: DuplicateGroup[]
+}
+
+function formatTime(value: string | null) {
+  return value ? new Date(value).toLocaleTimeString() : 'pending'
+}
+
+function ObservationList({ observations, evidence }: { observations: Observation[]; evidence: EvidenceRow[] }) {
+  if (!observations.length) return <p className="observation-empty">No candidate observations were accepted in this run.</p>
+  const byId = new Map(evidence.map((row) => [row.id, row]))
+  return (
+    <div className="observation-list">
+      {observations.map((observation, index) => {
+        const rows = observation.evidence.map((id) => byId.get(id)).filter((row): row is EvidenceRow => Boolean(row))
+        return (
+          <article className="observation-card" key={`${observation.category}-${index}`}>
+            <div className="observation-head">
+              <strong>{observation.category.replace(/_/g, ' ')}</strong>
+              <span className="observation-status">{observation.status || 'unverified'}</span>
+            </div>
+            <p>{observation.explanation}</p>
+            <div className="observation-sources">
+              <span>Confidence {Number(observation.confidence ?? 0).toFixed(2)}</span>
+              <span>Cited records {observation.recordIds.join(', ') || 'none'}</span>
+              <span>Source rows {rows.map((row) => `#${row.rowNumber ?? '?'} ${row.recordId}`).join(', ') || 'none'}</span>
+            </div>
+          </article>
+        )
+      })}
+    </div>
+  )
+}
+
+function CompactObservations({ observations }: { observations: Observation[] }) {
+  if (!observations.length) return <span>—</span>
+  return (
+    <ul className="compact-observations">
+      {observations.map((observation, index) => (
+        <li key={index}><b>{observation.category.replace(/_/g, ' ')}</b> {observation.explanation} <em>{observation.status || 'unverified'}</em></li>
+      ))}
+    </ul>
+  )
+}
+
+function RunDetail({ run, evidence }: { run: AgentRun; evidence: EvidenceRow[] }) {
+  const isAuditor = run.agent_name === 'Adversarial Auditor'
+  return (
+    <article className={`run-detail ${isAuditor ? 'auditor' : ''}`}>
+      <div className="run-detail-head">
+        <div><strong>{run.agent_name}</strong><small>{run.id}</small></div>
+        <span className={`run-status ${run.status}`}>{run.status}</span>
+      </div>
+      <div className="run-times">
+        <span>Started {formatTime(run.started_at)}</span>
+        <span>Finished {formatTime(run.finished_at)}</span>
+        {isAuditor && run.summary?.reviewedCount ? <span>Challenged {run.summary.reviewedCount} candidate observations</span> : null}
+        {run.error_code && <span className="run-error">{run.error_code}</span>}
+      </div>
+      <ObservationList observations={run.summary?.observations || []} evidence={evidence} />
+    </article>
+  )
+}
+
+function BatchPanel({ detail }: { detail: BatchDetail }) {
+  const specialists = detail.runs.filter((run) => run.agent_name !== 'Adversarial Auditor')
+  const auditor = detail.runs.find((run) => run.agent_name === 'Adversarial Auditor')
+  return (
+    <section className="app-panel batch-panel">
+      <div className="panel-heading">
+        <div><span>Mozaik batch {detail.batch.id.slice(0, 8)}</span><strong>{detail.batch.status} · {detail.batch.model}</strong></div>
+      </div>
+      <div className="batch-timeline">
+        <span>Started {formatTime(detail.batch.createdAt)}</span>
+        <span>Finished {formatTime(detail.batch.finishedAt)}</span>
+        <span>{specialists.length} specialists ran in parallel{auditor ? '; auditor ran after them' : ''}</span>
+      </div>
+      {detail.runs.length ? (
+        <div className="run-grid">{detail.runs.map((run) => <RunDetail key={run.id} run={run} evidence={detail.evidence} />)}</div>
+      ) : <p className="investigation-note">The batch is queued. This panel refreshes automatically.</p>}
+    </section>
+  )
+}
+
+function DuplicateMatches({ groups }: { groups: DuplicateGroup[] }) {
+  if (!groups.length) return null
+  return (
+    <section className="app-panel batch-panel">
+      <div className="panel-heading"><div><span>Deterministic check</span><strong>Possible duplicate payouts</strong></div></div>
+      <p className="investigation-note">Matching reference, currency and amount. This is a source-row check, not an agent finding.</p>
+      {groups.map((group) => (
+        <div className="duplicate-group" key={group.key}>
+          <div className="duplicate-head"><strong>{group.reference}</strong><span>{group.currency} {group.amount}</span></div>
+          <table>
+            <thead><tr><th>Row</th><th>Source record ID</th><th>Amount</th><th>Source status</th><th>Evidence ID</th></tr></thead>
+            <tbody>{group.rows.map((row) => (
+              <tr key={row.id}>
+                <td>#{row.rowNumber ?? '?'}</td>
+                <td><strong>{row.recordId}</strong></td>
+                <td>{row.amount}</td>
+                <td>{row.originalStatus || row.status}</td>
+                <td><small>{row.id}</small></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      ))}
+    </section>
+  )
+}
+
 function Brand({ light = false }: { light?: boolean }) {
   return (
     <Link className={`brand ${light ? 'brand-light' : ''}`} to="/" aria-label="Payout Forensics home">
@@ -483,7 +646,7 @@ function Dashboard() {
               <section className="app-panel agents-panel">
                 <div className="panel-heading"><div><span>Mozaik agent execution</span><strong>{agentRuns.length} persisted agent runs</strong></div><Link to="/app/agents">View all</Link></div>
                 {agentRuns.slice(0, 4).map((run) => (
-                  <div className="agent-list-row" key={run.id}><span className="agent-letter">{run.agent_name[0]}</span><p><strong>{run.agent_name}</strong><small>{run.error_code || 'Execution state'}</small></p><b className={run.status === 'failed' ? 'failed' : ''}>{run.status}</b></div>
+                  <div className="agent-list-row" key={run.id}><span className="agent-letter">{run.agent_name[0]}</span><p><strong>{run.agent_name}</strong><small>{run.error_code || 'Execution state'}</small></p><b className={['failed', 'partial', 'interrupted'].includes(run.status) ? run.status : ''}>{run.status}</b></div>
                 ))}
                 {!agentRuns.length && <div className="dashboard-empty compact"><Users size={20} /><strong>No agent executions yet</strong><span>Mozaik runs will appear here after you start one.</span></div>}
               </section>
@@ -523,10 +686,13 @@ function WorkspacePage() {
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [status, setStatus] = useState('')
   const [investigations, setInvestigations] = useState<Array<{ id: string; name: string; status: string; variance: string; created_at: string }>>([])
-  const [records, setRecords] = useState<Array<{ id: string; recordId: string; status: string; amount: string; source: string; investigationId: string }>>([])
-  const [runs, setRuns] = useState<Array<{ id: string; investigation_id: string; agent_name: string; status: string; summary: { observations: Array<{ category: string; recordIds: string[]; explanation: string; status: string }> } | null }>>([])
+  const [records, setRecords] = useState<Array<EvidenceRow & { investigationId: string }>>([])
+  const [runs, setRuns] = useState<AgentRun[]>([])
   const [mozaikConfigured, setMozaikConfigured] = useState(false)
   const [newInvestigationId, setNewInvestigationId] = useState('')
+  const [activeBatchId, setActiveBatchId] = useState('')
+  const [batchDetail, setBatchDetail] = useState<BatchDetail | null>(null)
+  const [duplicateGroups, setDuplicateGroups] = useState<DuplicateGroup[]>([])
   const selectedInvestigation = isInvestigationDetail ? investigations.find((item) => item.id === segment) : undefined
   const investigationRuns = runs.filter((run) => run.investigation_id === segment)
 
@@ -569,8 +735,49 @@ function WorkspacePage() {
         }))
         setRecords(evidenceSets.flat())
       }
+      if (isInvestigationDetail && (dashboard.investigations || []).some((item: { id: string }) => item.id === segment)) {
+        const response = await fetch(`/api/investigations/${segment}/duplicate-check`, { credentials: 'include' })
+        if (response.ok) {
+          const data = await response.json()
+          setDuplicateGroups(data.groups || [])
+        }
+      }
     }).catch(() => setStatus('Workspace data could not be loaded. Refresh and try again.'))
   }, [isSettings, isInvestigationDetail, segment])
+
+  useEffect(() => {
+    if (!activeBatchId) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout>
+    async function poll() {
+      try {
+        const response = await fetch(`/api/mozaik/batches/${activeBatchId}`, { credentials: 'include' })
+        if (!response.ok) return
+        const detail: BatchDetail = await response.json()
+        if (cancelled) return
+        setBatchDetail(detail)
+        if (detail.batch.status === 'queued' || detail.batch.status === 'running') {
+          timer = setTimeout(poll, 2000)
+          return
+        }
+        setActiveBatchId('')
+        setStatus(`Mozaik batch finished with status ${detail.batch.status}.`)
+        const [runsResponse, dashboardResponse] = await Promise.all([
+          fetch('/api/mozaik/runs', { credentials: 'include' }),
+          fetch('/api/dashboard', { credentials: 'include' }),
+        ])
+        if (!cancelled && runsResponse.ok && dashboardResponse.ok) {
+          const [runData, dashboard] = await Promise.all([runsResponse.json(), dashboardResponse.json()])
+          setRuns(runData.runs || [])
+          setInvestigations(dashboard.investigations || [])
+        }
+      } catch {
+        if (!cancelled) setStatus('Batch status could not be polled. Check Agent activity.')
+      }
+    }
+    timer = setTimeout(poll, 0)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [activeBatchId])
 
   async function createInvestigation() {
     setStatus('')
@@ -646,7 +853,13 @@ function WorkspacePage() {
         body: JSON.stringify({ confirmExternalProcessing: true }),
       })
       const data = await response.json()
-      setStatus(response.ok ? `Mozaik run ${data.runId} is ${data.status}.` : data.error || 'Unable to start Mozaik')
+      if (response.ok) {
+        setStatus(`Mozaik run ${data.runId} is ${data.status}. This panel updates automatically.`)
+        setBatchDetail(null)
+        setActiveBatchId(data.runId)
+      } else {
+        setStatus(data.error || 'Unable to start Mozaik')
+      }
     } catch {
       setStatus('The run status could not be confirmed. Check agent activity before retrying.')
     }
@@ -693,7 +906,7 @@ function WorkspacePage() {
           </section>
           <section className="app-panel create-form">
             <label>Investigation name<input value={investigationName} onChange={(event) => setInvestigationName(event.target.value)} required /></label>
-            <small className="provider-note">Imports preserve record IDs and amounts. Automated reconciliation totals and finding statuses are not available yet.</small>
+            <small className="provider-note">Imports preserve record IDs, amounts, source row numbers and supplied reference, currency, type and status. Automated reconciliation totals are not available yet.</small>
             <button className="primary-button" type="button" onClick={createInvestigation}>Start investigation <ArrowRight size={16} /></button>
             <small className="provider-note">{mozaikConfigured ? 'Mozaik is configured. You choose when to send your records for agent review.' : 'Mozaik agent runs require a configured model provider API key.'}</small>
             {newInvestigationId && <button className="secondary-button" type="button" onClick={() => runInvestigation(newInvestigationId)} disabled={!mozaikConfigured}>Start Mozaik agents</button>}
@@ -713,27 +926,46 @@ function WorkspacePage() {
         </section>
       ) : isInvestigationDetail ? (
         selectedInvestigation ? (
-          <section className="app-panel data-table-panel">
-            <div className="panel-heading">
-              <div><span>{selectedInvestigation.id}</span><strong>{selectedInvestigation.name} · {selectedInvestigation.status}</strong></div>
-              <button className="table-action" onClick={() => runInvestigation(selectedInvestigation.id)} disabled={!mozaikConfigured}>Run agents</button>
-            </div>
-            <p className="investigation-note">Financial variance is not calculated. Imported rows and agent observations are shown as evidence, not verified accounting findings.</p>
-            <table>
-              <thead><tr><th>Source record ID</th><th>Import status</th><th>Amount</th><th>Source file</th></tr></thead>
-              <tbody>{records.length ? records.map((row) => (
-                <tr key={row.id}><td><strong>{row.recordId}</strong><small>{row.id}</small></td><td>{row.status}</td><td>{row.amount}</td><td>{row.source}</td></tr>
-              )) : <tr><td colSpan={4}>No evidence rows uploaded to this investigation.</td></tr>}</tbody>
-            </table>
-            <div className="panel-heading investigation-runs-heading"><div><span>Agent activity</span><strong>Persisted candidate observations</strong></div></div>
-            <table>
-              <thead><tr><th>Specialist</th><th>Status</th><th>Candidate observations</th></tr></thead>
-              <tbody>{investigationRuns.length ? investigationRuns.map((run) => (
-                <tr key={run.id}><td><strong>{run.agent_name}</strong><small>{run.id}</small></td><td>{run.status}</td><td>{run.summary?.observations?.length || 0}</td></tr>
-              )) : <tr><td colSpan={3}>No agent runs for this investigation.</td></tr>}</tbody>
-            </table>
+          <>
+            <section className="app-panel data-table-panel">
+              <div className="panel-heading">
+                <div><span>{selectedInvestigation.id}</span><strong>{selectedInvestigation.name} · {selectedInvestigation.status}</strong></div>
+                <button className="table-action" onClick={() => runInvestigation(selectedInvestigation.id)} disabled={!mozaikConfigured || Boolean(activeBatchId)}>Run agents</button>
+              </div>
+              <p className="investigation-note">Financial variance is not calculated. Imported rows and agent observations are shown as evidence, not verified accounting findings.</p>
+              <table>
+                <thead><tr><th>Row</th><th>Source record ID</th><th>Reference</th><th>Currency</th><th>Type</th><th>Source status</th><th>Amount</th><th>Source file</th></tr></thead>
+                <tbody>{records.length ? records.map((row) => (
+                  <tr key={row.id}>
+                    <td>#{row.rowNumber ?? '?'}</td>
+                    <td><strong>{row.recordId}</strong><small>{row.id}</small></td>
+                    <td>{row.reference || '—'}</td>
+                    <td>{row.currency || '—'}</td>
+                    <td>{row.type || '—'}</td>
+                    <td>{row.originalStatus || row.status}</td>
+                    <td>{row.amount}</td>
+                    <td>{row.source}</td>
+                  </tr>
+                )) : <tr><td colSpan={8}>No evidence rows uploaded to this investigation.</td></tr>}</tbody>
+              </table>
+              <div className="panel-heading investigation-runs-heading"><div><span>Agent activity</span><strong>Persisted runs with timings</strong></div></div>
+              <table>
+                <thead><tr><th>Specialist</th><th>Status</th><th>Started</th><th>Finished</th><th>Candidate observations</th></tr></thead>
+                <tbody>{investigationRuns.length ? investigationRuns.map((run) => (
+                  <tr key={run.id}>
+                    <td><strong>{run.agent_name}</strong><small>{run.error_code || run.id}</small></td>
+                    <td>{run.status}</td>
+                    <td>{formatTime(run.started_at)}</td>
+                    <td>{formatTime(run.finished_at)}</td>
+                    <td><CompactObservations observations={run.summary?.observations || []} /></td>
+                  </tr>
+                )) : <tr><td colSpan={5}>No agent runs for this investigation.</td></tr>}</tbody>
+              </table>
+            </section>
+            <DuplicateMatches groups={duplicateGroups} />
+            {batchDetail && batchDetail.batch.investigationId === segment && <BatchPanel detail={batchDetail} />}
             {status && <div className="settings-status">{status}</div>}
-          </section>
+          </>
         ) : (
           <section className="app-panel empty-workspace"><Search size={24} /><h2>Investigation not found</h2><p>This case does not exist in your account.</p><Link className="text-link" to="/app/investigations">Back to investigations</Link></section>
         )
@@ -741,20 +973,36 @@ function WorkspacePage() {
         <section className="app-panel data-table-panel">
           <div className="panel-heading"><div><span>Mozaik agent activity</span><strong>Persisted execution status and evidence-linked candidate observations</strong></div></div>
           <table>
-            <thead><tr><th>Specialist</th><th>Status</th><th>Investigation</th><th>Candidate observations</th></tr></thead>
+            <thead><tr><th>Specialist</th><th>Status</th><th>Investigation</th><th>Started</th><th>Finished</th><th>Candidate observations</th></tr></thead>
             <tbody>{runs.length ? runs.map((run) => (
-              <tr key={run.id}><td><strong>{run.agent_name}</strong><small>{run.id}</small></td><td>{run.status}</td><td>{run.investigation_id}</td><td>{run.summary?.observations?.length || 0}</td></tr>
-            )) : <tr><td colSpan={4}>No Mozaik executions yet. Configure a model provider and start an agent run from an investigation.</td></tr>}</tbody>
+              <tr key={run.id}>
+                <td><strong>{run.agent_name}</strong><small>{run.error_code || run.id}</small></td>
+                <td>{run.status}</td>
+                <td>{run.investigation_id}</td>
+                <td>{formatTime(run.started_at)}</td>
+                <td>{formatTime(run.finished_at)}</td>
+                <td><CompactObservations observations={run.summary?.observations || []} /></td>
+              </tr>
+            )) : <tr><td colSpan={6}>No Mozaik executions yet. Configure a model provider and start an agent run from an investigation.</td></tr>}</tbody>
           </table>
         </section>
       ) : ['evidence', 'transactions'].includes(segment) ? (
         <section className="app-panel data-table-panel">
           <div className="panel-heading"><div><span>{title}</span><strong>Imported records from your investigations</strong></div></div>
           <table>
-            <thead><tr><th>Source record ID</th><th>Import status</th><th>Amount</th><th>Source file</th><th>Investigation</th></tr></thead>
+            <thead><tr><th>Row</th><th>Source record ID</th><th>Reference</th><th>Currency</th><th>Import status</th><th>Amount</th><th>Source file</th><th>Investigation</th></tr></thead>
             <tbody>{records.length ? records.map((row) => (
-              <tr key={row.id}><td><strong>{row.recordId}</strong><small>{row.id}</small></td><td>{row.status}</td><td>{row.amount}</td><td>{row.source}</td><td>{row.investigationId}</td></tr>
-            )) : <tr><td colSpan={5}>No records uploaded to your workspace yet.</td></tr>}</tbody>
+              <tr key={row.id}>
+                <td>#{row.rowNumber ?? '?'}</td>
+                <td><strong>{row.recordId}</strong><small>{row.id}</small></td>
+                <td>{row.reference || '—'}</td>
+                <td>{row.currency || '—'}</td>
+                <td>{row.status}</td>
+                <td>{row.amount}</td>
+                <td>{row.source}</td>
+                <td>{row.investigationId}</td>
+              </tr>
+            )) : <tr><td colSpan={8}>No records uploaded to your workspace yet.</td></tr>}</tbody>
           </table>
         </section>
       ) : segment === 'settlements' ? (
