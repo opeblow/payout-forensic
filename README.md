@@ -1,5 +1,11 @@
 # <img src="public/favicon.svg" alt="Payout Forensics logo" width="48" height="48" /> Payout Forensics
 
+## DEMO VIDEO
+
+[![Payout Forensics demo video](https://img.youtube.com/vi/RTe0JV4WMXU/0.jpg)](https://youtu.be/RTe0JV4WMXU)
+
+[Watch the demo on YouTube](https://youtu.be/RTe0JV4WMXU)
+
 **Every transaction has a story. Every discrepancy leaves a trace.**
 
 Payout Forensics is an account-scoped financial investigation workspace for uploaded transaction, payout, refund, fee and settlement records. It imports CSV evidence, runs coordinated specialist agents through the Mozaik runtime, and preserves source-linked candidate observations for review.
@@ -26,6 +32,7 @@ Without a provider key, steps 1–5 and the complete API test suite still run lo
 
 ## Contents
 
+- [DEMO VIDEO](#demo-video)
 - [Judge demo: possible duplicate payout](#judge-demo-possible-duplicate-payout)
 - [Problem](#problem)
 - [How the system works](#how-the-system-works)
