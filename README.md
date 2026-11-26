@@ -1,12 +1,10 @@
 # <img src="public/favicon.svg" alt="Payout Forensics logo" width="48" height="48" /> Payout Forensics
 
-## PRODUCT URL
+## Product URL
 
 **Live product:** [https://payout-forensic.onrender.com](https://payout-forensic.onrender.com)
 
-<iframe src="https://payout-forensic.onrender.com" title="Payout Forensics live product" width="100%" height="520" style="border:1px solid #2b2a25;border-radius:12px;"></iframe>
-
-## DEMO VIDEO
+## Demo video
 
 [![Payout Forensics demo video](https://img.youtube.com/vi/RTe0JV4WMXU/0.jpg)](https://youtu.be/RTe0JV4WMXU)
 
@@ -47,8 +45,8 @@ Without a provider key, the full steps 1–7 and the API test suite still run lo
 
 ## Contents
 
-- [PRODUCT URL](#product-url)
-- [DEMO VIDEO](#demo-video)
+- [Product URL](#product-url)
+- [Demo video](#demo-video)
 - [Brand](#brand)
 - [Judge demo: possible duplicate payout](#judge-demo-possible-duplicate-payout)
 - [Problem](#problem)
