@@ -17,9 +17,10 @@ import { findDuplicateGroups } from './lib/duplicate-check.mjs'
 import { resolveBatchStatus, displayVariance } from './lib/batch-status.mjs'
 
 const app = express()
-const port = Number(process.env.PORT || 8787)
-const host = process.env.HOST || '127.0.0.1'
-const dataDirectory = path.resolve(process.env.DATA_DIR || './data')
+const isHosted = process.env.RENDER === 'true' || process.env.NODE_ENV === 'production'
+const port = Number(process.env.PORT || (isHosted ? 10000 : 8787))
+const host = process.env.HOST || (isHosted ? '0.0.0.0' : '127.0.0.1')
+const dataDirectory = path.resolve(process.env.DATA_DIR || (isHosted ? '/tmp/payout-forensics-data' : './data'))
 const uploadDirectory = path.join(dataDirectory, 'uploads')
 function readBoundedInt(name, fallback, min, max) {
   const raw = process.env[name]
@@ -28,8 +29,8 @@ function readBoundedInt(name, fallback, min, max) {
   return Number.isInteger(value) && value >= min && value <= max ? value : fallback
 }
 const maxAgentSteps = readBoundedInt('MOZAIK_MAX_STEPS', 3, 1, 10)
-if (process.env.NODE_ENV === 'production' && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32 || !process.env.DATA_ENCRYPTION_KEY || process.env.DATA_ENCRYPTION_KEY.length < 32)) {
-  throw new Error('Production requires JWT_SECRET and DATA_ENCRYPTION_KEY values of at least 32 characters.')
+if (isHosted && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32 || !process.env.DATA_ENCRYPTION_KEY || process.env.DATA_ENCRYPTION_KEY.length < 32)) {
+  throw new Error('Hosted deployments require JWT_SECRET and DATA_ENCRYPTION_KEY values of at least 32 characters.')
 }
 const jwtSecret = process.env.JWT_SECRET || crypto.randomBytes(48).toString('hex')
 const encryptionKey = crypto.createHash('sha256').update(process.env.DATA_ENCRYPTION_KEY || 'development-only-change-me').digest()
