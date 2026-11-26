@@ -46,6 +46,7 @@ Without a provider key, the full steps 1–7 and the API test suite still run lo
 - [Screenshots](#screenshots)
 - [Demonstration](#demonstration)
 - [Installation and quick start](#installation-and-quick-start)
+- [Deploying to Render](#deploying-to-render)
 - [Testing and quality](#testing-and-quality)
 - [Security and data handling](#security-and-data-handling)
 - [Engineering decisions](#engineering-decisions)
@@ -538,7 +539,14 @@ npm run build
 npm run preview
 ```
 
-`npm run preview` serves the built frontend; it does not start or proxy the Express API or initialize TLS, backups or persistent storage.
+`npm start` serves the built frontend and the API from one Express process. `npm run preview` serves only the built frontend; it does not start or proxy the API or initialize TLS, backups or persistent storage.
+
+### Deploying to Render
+
+1. Create a **Web Service** from this repository with Runtime **Node**, Build Command `npm ci && npm run build`, Start Command `npm start`, and Health Check Path `/api/health`.
+2. Set `HOST=0.0.0.0`, `PORT=10000` and `DATA_DIR=/data`. Add a persistent disk mounted at `/data` so SQLite files and uploads survive restarts.
+3. Set strong random `JWT_SECRET` and `DATA_ENCRYPTION_KEY` values in the host secret store. Do not add provider keys; the model-free demo needs none.
+4. Keep registration private or gated for judging. Do not deploy the Vite dev server.
 
 ## Testing and quality
 
